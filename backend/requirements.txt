@@ -1,0 +1,19 @@
+# Core FastAPI
+fastapi
+uvicorn[standard]
+python-multipart
+
+# LangChain & LangGraph
+langchain-anthropic
+langchain-openai
+langchain-community
+langgraph
+langchain-mcp-adapters
+
+# MCP
+mcp[cli]
+
+# Utilities
+python-dotenv
+nest-asyncio
+pytz
