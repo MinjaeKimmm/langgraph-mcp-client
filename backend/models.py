@@ -7,7 +7,8 @@ class ToolConfig(BaseModel):
     command: Optional[str] = None
     args: Optional[List[str]] = None
     url: Optional[str] = None
-    transport: str = Field(default="stdio", description="Transport method: stdio or sse")
+    transport: str = Field(default="stdio", description="Transport method: stdio, http, or sse")
+    headers: Optional[dict[str, str]] = Field(default=None, description="HTTP headers for HTTP transport")
 
 
 class ChatMessage(BaseModel):
@@ -22,6 +23,7 @@ class ChatRequest(BaseModel):
     timeout_seconds: Optional[int] = Field(default=120, description="Timeout in seconds")
     recursion_limit: Optional[int] = Field(default=100, description="Recursion limit")
     thread_id: Optional[str] = None
+    enabled_tools: Optional[List[str]] = Field(default=None, description="List of enabled tool server names")
 
 
 class ToolCall(BaseModel):
@@ -58,6 +60,16 @@ class ToolInfo(BaseModel):
     description: Optional[str] = None
     parameters: Optional[Dict[str, Any]] = None
     server_name: str
+
+
+class ServerToolInfo(BaseModel):
+    name: str
+    description: Optional[str] = None
+    tools: List[ToolInfo]
+    
+
+class GroupedToolsResponse(BaseModel):
+    servers: Dict[str, ServerToolInfo]
 
 
 class ConfigUpdateRequest(BaseModel):

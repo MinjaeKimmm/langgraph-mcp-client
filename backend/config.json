@@ -1,0 +1,35 @@
+{
+  "time": {
+    "command": "python",
+    "args": [
+      "-m",
+      "mcp_servers.time_server"
+    ],
+    "transport": "stdio",
+    "env": {
+      "PYTHONPATH": "."
+    }
+  },
+  "weather": {
+    "command": "python",
+    "args": [
+      "-m",
+      "mcp_servers.weather_server"
+    ],
+    "transport": "stdio",
+    "env": {
+      "PYTHONPATH": "."
+    }
+  },
+  "google_drive": {
+    "command": "python",
+    "args": [
+      "-m",
+      "mcp_servers.google_drive"
+    ],
+    "transport": "stdio",
+    "env": {
+      "PYTHONPATH": "."
+    }
+  }
+}

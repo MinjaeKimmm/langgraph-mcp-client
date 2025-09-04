@@ -18,6 +18,7 @@ interface ChatRequest {
   timeout_seconds?: number;
   recursion_limit?: number;
   thread_id?: string;
+  enabled_tools?: string[];
 }
 
 interface ChatResponse {
@@ -51,7 +52,16 @@ interface ToolInfo {
   name: string;
   description?: string;
   parameters?: any;
-  server_name: string;
+}
+
+interface ServerInfo {
+  name: string;
+  description?: string;
+  tools: ToolInfo[];
+}
+
+interface GroupedToolsResponse {
+  servers: Record<string, ServerInfo>;
 }
 
 const API_BASE_URL = 'http://localhost:8000';
@@ -62,18 +72,20 @@ function App() {
   const [inputMessage, setInputMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [status, setStatus] = useState<AgentStatus | null>(null);
-  const [tools, setTools] = useState<ToolInfo[]>([]);
+  const [groupedTools, setGroupedTools] = useState<GroupedToolsResponse>({ servers: {} });
   // const [config, setConfig] = useState<Record<string, ToolConfig>>({});
   const [selectedModel, setSelectedModel] = useState('claude-3-7-sonnet-latest');
   const [timeoutSeconds, setTimeoutSeconds] = useState(120);
   const [recursionLimit, setRecursionLimit] = useState(100);
   const [threadId, setThreadId] = useState<string>('');
+  const [enabledTools, setEnabledTools] = useState<Set<string>>(new Set());
   
   // UI state
   const [showSettings, setShowSettings] = useState(false);
   const [newToolName, setNewToolName] = useState('');
   const [newToolConfig, setNewToolConfig] = useState('{}');
   const [expandedTools, setExpandedTools] = useState<{[key: string]: boolean}>({});
+  const [showToolPanel, setShowToolPanel] = useState(true); // Open by default
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -93,6 +105,14 @@ function App() {
     // Generate initial thread ID
     setThreadId(Math.random().toString(36).substring(2, 15));
   }, []);
+  
+  // Enable all tools by default when tools are loaded
+  useEffect(() => {
+    const serverNames = Object.keys(groupedTools.servers);
+    if (serverNames.length > 0 && enabledTools.size === 0) {
+      setEnabledTools(new Set(serverNames));
+    }
+  }, [groupedTools, enabledTools.size]);
 
   // API calls
   const fetchStatus = async () => {
@@ -107,8 +127,8 @@ function App() {
 
   const fetchTools = async () => {
     try {
-      const response = await axios.get<ToolInfo[]>(`${API_BASE_URL}/tools`);
-      setTools(response.data);
+      const response = await axios.get<GroupedToolsResponse>(`${API_BASE_URL}/tools`);
+      setGroupedTools(response.data);
     } catch (error) {
       console.error('Error fetching tools:', error);
     }
@@ -138,7 +158,8 @@ function App() {
         model: selectedModel,
         timeout_seconds: timeoutSeconds,
         recursion_limit: recursionLimit,
-        thread_id: threadId
+        thread_id: threadId,
+        enabled_tools: Array.from(enabledTools)
       };
 
       const response = await fetch(`${API_BASE_URL}/chat/stream`, {
@@ -318,6 +339,37 @@ function App() {
     setThreadId(Math.random().toString(36).substring(2, 15));
   };
 
+  // Tool selection functions
+  const toggleTool = (serverName: string) => {
+    setEnabledTools(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(serverName)) {
+        newSet.delete(serverName);
+      } else {
+        newSet.add(serverName);
+      }
+      return newSet;
+    });
+  };
+
+  const enableAllTools = () => {
+    const serverNames = Object.keys(groupedTools.servers);
+    setEnabledTools(new Set(serverNames));
+  };
+
+  const disableAllTools = () => {
+    setEnabledTools(new Set());
+  };
+
+  // Get unique servers (tool groups)
+  const getUniqueServers = () => {
+    return Object.entries(groupedTools.servers).map(([serverId, serverInfo]) => ({
+      id: serverId,
+      name: serverInfo.name,
+      tools: serverInfo.tools
+    }));
+  };
+
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -333,6 +385,95 @@ function App() {
         <div className="p-4 border-b">
           <h1 className="text-xl font-bold text-gray-800">MCP Agent</h1>
           <p className="text-sm text-gray-600">LangGraph + MCP Tools</p>
+        </div>
+
+        {/* Tool Selection Section */}
+        <div className="p-4 border-b">
+          <button
+            onClick={() => setShowToolPanel(!showToolPanel)}
+            className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-3"
+          >
+            {showToolPanel ? (
+              <ChevronDown size={16} className="text-gray-400" />
+            ) : (
+              <ChevronRight size={16} className="text-gray-400" />
+            )}
+            <Wrench size={16} />
+            Available Connectors ({Array.from(enabledTools).length}/{getUniqueServers().length})
+          </button>
+          
+          {showToolPanel && (
+            <div className="space-y-3">
+              <div className="flex gap-2">
+                <button
+                  onClick={enableAllTools}
+                  className="flex-1 px-2 py-1 text-xs bg-green-100 text-green-700 rounded hover:bg-green-200"
+                >
+                  Enable All
+                </button>
+                <button
+                  onClick={disableAllTools}
+                  className="flex-1 px-2 py-1 text-xs bg-red-100 text-red-700 rounded hover:bg-red-200"
+                >
+                  Disable All
+                </button>
+              </div>
+              
+              {getUniqueServers().map(server => (
+                <div key={server.id} className="flex items-center justify-between p-2 bg-gray-50 rounded">
+                  <div className="flex-1">
+                    <div className="font-medium text-sm">{server.name}</div>
+                    <div className="text-xs text-gray-600">
+                      {server.tools.length} tool{server.tools.length !== 1 ? 's' : ''}
+                    </div>
+                    <div className="text-xs text-gray-500 mt-1">
+                      {server.tools.map((tool: ToolInfo) => tool.name).join(', ')}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => toggleTool(server.id)}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                      enabledTools.has(server.id) 
+                        ? 'bg-blue-600' 
+                        : 'bg-gray-300'
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                        enabledTools.has(server.id) 
+                          ? 'translate-x-6' 
+                          : 'translate-x-1'
+                      }`}
+                    />
+                  </button>
+                </div>
+              ))}
+              
+              {/* Add Connector Form */}
+              <div className="space-y-2 mt-4 pt-4 border-t border-gray-200">
+                <div className="text-xs font-medium text-gray-700 mb-2">Add New Connector</div>
+                <input
+                  placeholder="Connector name (e.g., 'my_server')"
+                  value={newToolName}
+                  onChange={(e) => setNewToolName(e.target.value)}
+                  className="w-full p-2 border rounded text-sm"
+                />
+                <textarea
+                  placeholder='{"command": "python", "args": ["./my_server.py"], "transport": "stdio"}'
+                  value={newToolConfig}
+                  onChange={(e) => setNewToolConfig(e.target.value)}
+                  className="w-full p-2 border rounded text-sm h-20 resize-none"
+                />
+                <button
+                  onClick={addTool}
+                  className="w-full flex items-center justify-center gap-2 bg-blue-500 text-white p-2 rounded text-sm hover:bg-blue-600"
+                >
+                  <Plus size={14} />
+                  Add Connector
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Settings Section */}
@@ -387,47 +528,6 @@ function App() {
           )}
         </div>
 
-        {/* Tools Section */}
-        <div className="p-4 border-b flex-1 overflow-y-auto">
-          <h3 className="text-sm font-medium text-gray-700 mb-3">Available Tools ({tools.length})</h3>
-          
-          <div className="space-y-2 mb-4">
-            {tools.map((tool) => (
-              <div key={tool.name} className="flex items-center justify-between p-2 bg-gray-50 rounded">
-                <span className="text-sm font-medium">{tool.name}</span>
-                <button
-                  onClick={() => removeTool(tool.name)}
-                  className="text-red-500 hover:text-red-700"
-                >
-                  <Trash2 size={14} />
-                </button>
-              </div>
-            ))}
-          </div>
-
-          {/* Add Tool Form */}
-          <div className="space-y-2">
-            <input
-              placeholder="Tool name"
-              value={newToolName}
-              onChange={(e) => setNewToolName(e.target.value)}
-              className="w-full p-2 border rounded text-sm"
-            />
-            <textarea
-              placeholder='{"command": "python", "args": ["./script.py"], "transport": "stdio"}'
-              value={newToolConfig}
-              onChange={(e) => setNewToolConfig(e.target.value)}
-              className="w-full p-2 border rounded text-sm h-20 resize-none"
-            />
-            <button
-              onClick={addTool}
-              className="w-full flex items-center justify-center gap-2 bg-blue-500 text-white p-2 rounded text-sm hover:bg-blue-600"
-            >
-              <Plus size={14} />
-              Add Tool
-            </button>
-          </div>
-        </div>
 
         {/* Status & Actions */}
         <div className="p-4 border-t">

@@ -11,9 +11,23 @@ langgraph
 langchain-mcp-adapters
 
 # MCP
-mcp[cli]
+fastmcp
 
 # Utilities
 python-dotenv
 nest-asyncio
 pytz
+
+# Google API dependencies
+google-api-python-client
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+
+# PDF processing (optional but recommended)
+pypdf  # For PDF text extraction
+
+# HTML to Markdown conversion (optional)
+markdownify  # For converting HTML to Markdown
+
+uvicorn

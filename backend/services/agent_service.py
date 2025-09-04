@@ -1,5 +1,6 @@
 import asyncio
 import uuid
+import logging
 from typing import Any, Dict, List, Callable, Optional
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
@@ -12,6 +13,8 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from services.mcp_service import MCPService
+
+logger = logging.getLogger(__name__)
 
 
 # Utility functions (originally from utils.py)
@@ -218,14 +221,19 @@ Guidelines:
         
         return available_models or ["claude-3-7-sonnet-latest"]  # Default fallback
 
-    async def initialize_agent(self, model_name: str = "claude-3-7-sonnet-latest") -> bool:
+    async def initialize_agent(self, model_name: str = "claude-3-7-sonnet-latest", enabled_tools: Optional[List[str]] = None) -> bool:
         """Initialize agent with specified model and available tools"""
         try:
             # Ensure MCP service is initialized
             if not self.mcp_service.is_initialized():
                 await self.mcp_service.initialize()
             
-            tools = self.mcp_service.get_tools()
+            # Get filtered tools if enabled_tools is provided, otherwise get all tools
+            if enabled_tools:
+                tools = await self.mcp_service.get_filtered_tools(enabled_tools)
+            else:
+                tools = await self.mcp_service.get_tools()
+            
             if not tools:
                 return False
 
@@ -258,7 +266,7 @@ Guidelines:
             return True
             
         except Exception as e:
-            print(f"Error initializing agent: {str(e)}")
+            logger.error(f"Error initializing agent: {str(e)}")
             return False
 
     async def chat(
@@ -268,9 +276,15 @@ Guidelines:
         timeout_seconds: int = 120,
         recursion_limit: int = 100,
         callback: Optional[Callable] = None,
+        enabled_tools: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Send message to agent and get response"""
-        if not self.agent:
+        # Reinitialize agent with filtered tools if enabled_tools is provided
+        if enabled_tools is not None:
+            success = await self.initialize_agent(self.current_model or "claude-3-7-sonnet-latest", enabled_tools)
+            if not success:
+                raise RuntimeError("Failed to initialize agent with filtered tools")
+        elif not self.agent:
             raise RuntimeError("Agent not initialized. Call initialize_agent() first.")
 
         if not thread_id:
@@ -307,11 +321,11 @@ Guidelines:
         """Check if agent is properly initialized"""
         return self.agent is not None
 
-    def get_status(self) -> Dict[str, Any]:
+    async def get_status(self) -> Dict[str, Any]:
         """Get agent status information"""
         return {
             "initialized": self.is_initialized(),
-            "tool_count": self.mcp_service.get_tool_count(),
+            "tool_count": await self.mcp_service.get_tool_count(),
             "model": self.current_model or "claude-3-7-sonnet-latest",
             "available_models": self.get_available_models(),
         }

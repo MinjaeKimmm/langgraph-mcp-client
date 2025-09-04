@@ -1,16 +1,20 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks
+from pydantic import ValidationError
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import asyncio
 import json
+import os
 import time
+import logging
 from typing import Dict, Any, AsyncGenerator
 from dotenv import load_dotenv
 
 from models import (
     ChatRequest, ChatResponse, StreamingChatResponse, 
-    AgentStatus, ToolInfo, ConfigUpdateRequest, HealthResponse, ToolConfig
+    AgentStatus, ToolInfo, ConfigUpdateRequest, HealthResponse, ToolConfig,
+    GroupedToolsResponse
 )
 from services.config_service import ConfigService
 from services.mcp_service import MCPService
@@ -19,8 +23,12 @@ from services.agent_service import AgentService
 # Load environment variables
 load_dotenv(override=True)
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 # Global services
-config_service = ConfigService("mcp_servers/config.json")
+config_service = ConfigService("config.json")
 mcp_service = MCPService(config_service)
 agent_service = AgentService(mcp_service)
 
@@ -29,23 +37,24 @@ agent_service = AgentService(mcp_service)
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
     # Startup
-    print("= Starting MCP Agent Backend...")
+    logger.info("Starting MCP Agent Backend...")
     try:
         # Initialize MCP service
         await mcp_service.initialize()
-        print(f"MCP Service initialized with {mcp_service.get_tool_count()} tools")
+        tool_count = await mcp_service.get_tool_count()
+        logger.info(f"MCP Service initialized with {tool_count} tools")
         
         # Initialize agent with default model
         await agent_service.initialize_agent()
-        print("Agent Service initialized")
+        logger.info("Agent Service initialized")
         
     except Exception as e:
-        print(f"L Error during startup: {str(e)}")
+        logger.error(f"Error during startup: {str(e)}")
     
     yield
     
     # Shutdown
-    print("= Shutting down MCP Agent Backend...")
+    logger.info("Shutting down MCP Agent Backend...")
     await mcp_service.cleanup()
 
 
@@ -85,7 +94,7 @@ async def health_check():
         services={
             "mcp_service": "healthy" if mcp_service.is_initialized() else "unhealthy",
             "agent_service": "healthy" if agent_service.is_initialized() else "unhealthy",
-            "tool_count": str(mcp_service.get_tool_count())
+            "tool_count": str(await mcp_service.get_tool_count())
         }
     )
 
@@ -93,13 +102,14 @@ async def health_check():
 @app.get("/status", response_model=AgentStatus)
 async def get_status():
     """Get agent status"""
-    return AgentStatus(**agent_service.get_status())
+    status = await agent_service.get_status()
+    return AgentStatus(**status)
 
 
-@app.get("/tools", response_model=list[ToolInfo])
+@app.get("/tools", response_model=GroupedToolsResponse)
 async def get_tools():
-    """Get available tools"""
-    return mcp_service.get_tool_info()
+    """Get available tools grouped by server"""
+    return await mcp_service.get_grouped_tools()
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -114,12 +124,13 @@ async def chat(request: ChatRequest):
 
         start_time = time.time()
         
-        # Process chat request
+        # Process chat request 
         result = await agent_service.chat(
             message=request.message,
             thread_id=request.thread_id,
-            timeout_seconds=request.timeout_seconds,
-            recursion_limit=request.recursion_limit
+            timeout_seconds=request.timeout_seconds or 120,
+            recursion_limit=request.recursion_limit or 100,
+            enabled_tools=request.enabled_tools
         )
         
         execution_time = time.time() - start_time
@@ -218,32 +229,38 @@ async def chat_stream(request: ChatRequest):
                                             is_complete=False
                                         )
                     elif isinstance(content.content, str) and content.content:
-                        # Check if this looks like a tool result (contains timestamp patterns or specific formats)
+                        # Check if this looks like a tool result (JSON with "content" and "citations" fields)
                         content_str = content.content.strip()
-                        if ('Current time in' in content_str and 'KST' in content_str) or \
-                           ('Asia/Seoul' in content_str and ':' in content_str):
-                            # This is likely a tool result, treat as tool output
-                            tool_result = f"Tool Output: {content_str}"
-                            if tool_result not in collected_tool_calls:
-                                collected_tool_calls.append(tool_result)
-                                return StreamingChatResponse(
-                                    type="tool",
-                                    content=tool_result,
-                                    is_complete=False
-                                )
-                        else:
-                            # Regular LLM text response
-                            collected_response.append(content.content)
-                            return StreamingChatResponse(
-                                type="text", 
-                                content=content.content,
-                                is_complete=False
-                            )
                         
-                # Handle tool messages (tool responses) - only once per unique content
+                        # Try to detect if this is a tool result vs regular AI response
+                        if content_str.startswith('{') and content_str.endswith('}'):
+                            try:
+                                parsed = json.loads(content_str)
+                                # If it has 'content' and 'citations' fields, it's likely a tool result
+                                if isinstance(parsed, dict) and 'content' in parsed and 'citations' in parsed:
+                                    tool_result = f"Tool Result:\n{content_str}"
+                                    if tool_result not in collected_tool_calls:
+                                        collected_tool_calls.append(tool_result)
+                                        return StreamingChatResponse(
+                                            type="tool",
+                                            content=tool_result,
+                                            is_complete=False
+                                        )
+                            except json.JSONDecodeError:
+                                pass  # Not valid JSON, treat as regular text
+                        
+                        # Regular LLM text response
+                        collected_response.append(content.content)
+                        return StreamingChatResponse(
+                            type="text", 
+                            content=content.content,
+                            is_complete=False
+                        )
+                        
+                # Handle tool messages (tool responses from 'tools' node)
                 elif node == 'tools' and hasattr(content, 'content'):
-                    # Don't add tool results to collected_response (LLM text)
-                    tool_result = f"Tool Result: {content.content}"
+                    # Tool results from the tools node should be displayed separately
+                    tool_result = f"Tool Result:\n{content.content}"
                     # Only add if this exact result isn't already collected
                     if tool_result not in collected_tool_calls:
                         collected_tool_calls.append(tool_result)
@@ -270,7 +287,8 @@ async def chat_stream(request: ChatRequest):
                 thread_id=request.thread_id,
                 timeout_seconds=request.timeout_seconds,
                 recursion_limit=request.recursion_limit,
-                callback=streaming_callback_wrapper
+                callback=streaming_callback_wrapper,
+                enabled_tools=request.enabled_tools
             )
             
             # Send all captured streaming chunks
@@ -336,20 +354,44 @@ async def update_config(request: ConfigUpdateRequest):
 
 
 @app.post("/config/tool")
-async def add_tool(tool_name: str, tool_config: ToolConfig):
-    """Add a single tool to configuration"""
+async def add_tool(tool_name: str, tool_config: dict):
+    """Add a single tool to configuration with smart config extraction"""
     try:
-        success = await mcp_service.add_tool(tool_name, tool_config.model_dump(exclude_none=True))
-        if not success:
-            raise HTTPException(status_code=500, detail=f"Failed to add tool {tool_name}")
+        # Validate tool name
+        if not tool_name or not tool_name.strip():
+            raise HTTPException(status_code=400, detail="Tool name cannot be empty")
         
-        # Reinitialize agent
+        # Smart extraction of tool configuration from various formats
+        extracted_config = config_service.extract_tool_config(tool_config, tool_name)
+        
+        # Parse and validate using Pydantic
+        try:
+            validated_config = ToolConfig(**extracted_config)
+        except ValidationError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid configuration format: {str(e)}")
+            
+        # Convert to dict for service
+        config_dict = validated_config.model_dump(exclude_none=True)
+        
+        # Test the MCP connection before saving to config
+        success = await mcp_service.test_and_add_tool(tool_name, config_dict)
+        if not success:
+            raise HTTPException(status_code=500, detail=f"Failed to connect to MCP server '{tool_name}'. Configuration not saved.")
+        
+        # Reinitialize agent with new tools
         await agent_service.initialize_agent(agent_service.current_model or "claude-3-7-sonnet-latest")
         
-        return {"message": f"Tool {tool_name} added successfully"}
+        return {"message": f"Tool {tool_name} connected successfully and saved to configuration"}
         
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions as-is
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Validation error: {str(e)}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Unexpected error adding tool {tool_name}: {str(e)}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 @app.delete("/config/tool/{tool_name}")
