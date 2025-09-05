@@ -30,6 +30,7 @@ interface ChatMessage {
 interface ChatRequest {
   message: string;
   model?: string;
+  graph_type?: string;
   timeout_seconds?: number;
   recursion_limit?: number;
   thread_id?: string;
@@ -91,6 +92,7 @@ function App() {
   const [groupedTools, setGroupedTools] = useState<GroupedToolsResponse>({ servers: {} });
   // const [config, setConfig] = useState<Record<string, ToolConfig>>({});
   const [selectedModel, setSelectedModel] = useState('claude-3-7-sonnet-latest');
+  const [selectedGraphType, setSelectedGraphType] = useState('simple');
   const [timeoutSeconds, setTimeoutSeconds] = useState(120);
   const [recursionLimit, setRecursionLimit] = useState(100);
   const [threadId, setThreadId] = useState<string>('');
@@ -182,6 +184,7 @@ function App() {
       const request: ChatRequest = {
         message: originalMessage,
         model: selectedModel,
+        graph_type: selectedGraphType,
         timeout_seconds: timeoutSeconds,
         recursion_limit: recursionLimit,
         thread_id: threadId,
@@ -261,19 +264,17 @@ function App() {
                   
                 } else if (parsed.type === 'tool' && parsed.content && parsed.tool_call_id) {
                   const isToolCall = parsed.content.startsWith('Tool:');
+                  const isToolInput = parsed.content.startsWith('Tool Input:');
                   const isToolResult = parsed.content.startsWith('Tool Result:');
                   
                   if (isToolCall) {
-                    // Extract tool name and args
-                    const lines = parsed.content.split('\n');
-                    const toolName = lines[0].replace('Tool: ', '');
-                    const argsLine = lines.find(l => l.startsWith('Args: '));
-                    const args = argsLine ? argsLine.replace('Args: ', '') : '{}';
+                    // Extract tool name
+                    const toolName = parsed.content.replace('Tool: ', '');
                     
                     const toolCall: ToolCallInfo = {
                       id: parsed.tool_call_id,
                       name: toolName,
-                      args: args,
+                      args: '{}', // Will be updated when tool input arrives
                       expanded: false
                     };
                     
@@ -296,6 +297,34 @@ function App() {
                         )
                       );
                     });
+                    
+                  } else if (isToolInput) {
+                    // Update existing tool call with args
+                    const args = parsed.content.replace('Tool Input: ', '');
+                    const existingToolCall = toolCalls.get(parsed.tool_call_id);
+                    
+                    if (existingToolCall) {
+                      existingToolCall.args = args;
+                      toolCalls.set(parsed.tool_call_id, existingToolCall);
+                      
+                      // Update the tool call part with args
+                      flushSync(() => {
+                        setMessages(prev => 
+                          prev.map(msg => 
+                            msg.timestamp === assistantTimestamp && msg.role === 'assistant'
+                              ? {
+                                  ...msg,
+                                  parts: msg.parts.map(part => 
+                                    part.type === 'tool_call' && part.toolCall?.id === parsed.tool_call_id
+                                      ? { ...part, toolCall: existingToolCall }
+                                      : part
+                                  )
+                                }
+                              : msg
+                          )
+                        );
+                      });
+                    }
                     
                   } else if (isToolResult) {
                     // Update existing tool call with result
@@ -738,6 +767,31 @@ function App() {
 
         {/* Input Area */}
         <div className="bg-white border-t p-4">
+          <div className="flex gap-2 mb-3">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-gray-700">Mode:</span>
+              <button
+                onClick={() => setSelectedGraphType('simple')}
+                className={`px-3 py-1 text-sm rounded-full transition-colors ${
+                  selectedGraphType === 'simple'
+                    ? 'bg-blue-500 text-white'
+                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                }`}
+              >
+                Simple
+              </button>
+              <button
+                onClick={() => setSelectedGraphType('extended')}
+                className={`px-3 py-1 text-sm rounded-full transition-colors ${
+                  selectedGraphType === 'extended'
+                    ? 'bg-blue-500 text-white'
+                    : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                }`}
+              >
+                Extended
+              </button>
+            </div>
+          </div>
           <div className="flex gap-2">
             <textarea
               value={inputMessage}

@@ -116,9 +116,14 @@ async def get_tools():
 async def chat(request: ChatRequest):
     """Send message to agent and get response"""
     try:
-        # Initialize agent if needed or model changed
-        if not agent_service.is_initialized() or agent_service.current_model != request.model:
-            success = await agent_service.initialize_agent(request.model)
+        # Initialize agent if needed or model/graph_type changed
+        if (not agent_service.is_initialized() or 
+            agent_service.current_model != request.model or
+            agent_service.current_graph_type != (request.graph_type or "simple")):
+            success = await agent_service.initialize_agent(
+                request.model, 
+                graph_type=request.graph_type or "simple"
+            )
             if not success:
                 raise HTTPException(status_code=500, detail="Failed to initialize agent")
 
@@ -183,8 +188,13 @@ async def chat_stream(request: ChatRequest):
     async def generate_stream():
         try:
             # Initialize agent if needed
-            if not agent_service.is_initialized() or agent_service.current_model != request.model:
-                success = await agent_service.initialize_agent(request.model)
+            if (not agent_service.is_initialized() or 
+                agent_service.current_model != request.model or
+                agent_service.current_graph_type != (request.graph_type or "simple")):
+                success = await agent_service.initialize_agent(
+                    request.model, 
+                    graph_type=request.graph_type or "simple"
+                )
                 if not success:
                     yield f"data: {json.dumps({'error': 'Failed to initialize agent'})}\n\n"
                     return
@@ -229,9 +239,11 @@ async def chat_stream(request: ChatRequest):
                                         
                                         if tool_name != 'Unknown' and tool_id not in seen_tool_calls:
                                             seen_tool_calls.add(tool_id)
+                                            
+                                            # Skip streaming "Tool: Complete" messages
+                                            if tool_name == 'Complete':
+                                                continue
                                             tool_info = f"Tool: {tool_name}"
-                                            if 'input' in item:
-                                                tool_info += f"\nArgs: {json.dumps(item['input'], indent=2)}"
                                             collected_tool_calls.append(tool_info)
                                             
                                             response = StreamingChatResponse(
@@ -266,9 +278,11 @@ async def chat_stream(request: ChatRequest):
                             
                             if tool_name != 'Unknown' and tool_id not in seen_tool_calls:
                                 seen_tool_calls.add(tool_id)
+                                
+                                # Skip streaming "Tool: Complete" messages
+                                if tool_name == 'Complete':
+                                    continue
                                 tool_info = f"Tool: {tool_name}"
-                                if 'args' in tool_call:
-                                    tool_info += f"\nArgs: {json.dumps(tool_call['args'], indent=2)}"
                                 collected_tool_calls.append(tool_info)
                                 
                                 response = StreamingChatResponse(
@@ -283,12 +297,35 @@ async def chat_stream(request: ChatRequest):
                                     pass
                                 return response
                 
+                elif node == "tool_args":
+                    # Handle real tool arguments from graph service
+                    if isinstance(content, dict):
+                        tool_call_id = content.get('tool_call_id')
+                        tool_name = content.get('tool_name', 'unknown')
+                        args = content.get('args', {})
+                        
+                        if args:
+                            args_content = f"Tool Input: {json.dumps(args, indent=2)}"
+                            response = StreamingChatResponse(
+                                type="tool",
+                                content=args_content,
+                                tool_call_id=tool_call_id,
+                                is_complete=False
+                            )
+                            try:
+                                chunk_queue.put_nowait(response)
+                            except asyncio.QueueFull:
+                                pass
+                            return response
+                
                 elif node == "tools":
                     # Handle tool execution results from tools node
                     if hasattr(content, 'content') and content.content:
-                        tool_result = f"Tool Result:\n{content.content}"
-                        # Get tool_call_id from ToolMessage to link with original call
+                        # Get tool info
+                        tool_name = getattr(content, 'name', 'unknown')
                         result_tool_id = getattr(content, 'tool_call_id', None)
+                        
+                        tool_result = f"Tool Result: {content.content}"
                         
                         if tool_result not in collected_tool_calls:
                             collected_tool_calls.append(tool_result)

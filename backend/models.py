@@ -20,6 +20,7 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(description="User message to send to agent")
     model: Optional[str] = Field(default="claude-3-7-sonnet-latest", description="Model to use")
+    graph_type: Optional[str] = Field(default="simple", description="Graph type: simple or extended")
     timeout_seconds: Optional[int] = Field(default=120, description="Timeout in seconds")
     recursion_limit: Optional[int] = Field(default=100, description="Recursion limit")
     thread_id: Optional[str] = None
@@ -42,9 +43,8 @@ class ChatResponse(BaseModel):
 
 class StreamingChatResponse(BaseModel):
     """For streaming responses"""
-    type: str = Field(description="Type: text, tool_call, or complete")
+    type: str = Field(description="Type: text, tool, tool_args, or complete")
     content: Optional[str] = None
-    tool_call: Optional[ToolCall] = None
     tool_call_id: Optional[str] = Field(default=None, description="ID to group tool calls with their results")
     is_complete: bool = False
 
