@@ -178,7 +178,7 @@ async def chat(request: ChatRequest):
 
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
-    """Stream chat response"""
+    """Stream chat response with real-time SSE"""
     
     async def generate_stream():
         try:
@@ -189,12 +189,16 @@ async def chat_stream(request: ChatRequest):
                     yield f"data: {json.dumps({'error': 'Failed to initialize agent'})}\n\n"
                     return
 
-            collected_response = []
+            # Create a queue for real-time streaming
+            chunk_queue = asyncio.Queue()
+            chat_complete = False
+            
+            # Track state
             collected_tool_calls = []
-            seen_tool_calls = set()  # Track seen tool calls to avoid duplicates
+            seen_tool_calls = set()
             
             def streaming_callback(chunk: Dict[str, Any]):
-                """Callback for streaming responses"""
+                """Callback that puts chunks into queue immediately"""
                 node = chunk.get("node", "")
                 content = chunk.get("content", "")
                 
@@ -206,12 +210,16 @@ async def chat_stream(request: ChatRequest):
                                 if item.get("type") == "text":
                                     text = item.get("text", "")
                                     if text:
-                                        collected_response.append(text)
-                                        return StreamingChatResponse(
+                                        response = StreamingChatResponse(
                                             type="text",
                                             content=text,
                                             is_complete=False
                                         )
+                                        try:
+                                            chunk_queue.put_nowait(response)
+                                        except asyncio.QueueFull:
+                                            pass
+                                        return response
                                 elif item.get("type") == "tool_use":
                                     # Create unique identifier for this tool call
                                     tool_id = item.get('id', f"{item.get('name', 'Unknown')}_{len(collected_tool_calls)}")
@@ -223,11 +231,17 @@ async def chat_stream(request: ChatRequest):
                                         if 'input' in item:
                                             tool_info += f"\nInput: {json.dumps(item['input'], indent=2)}"
                                         collected_tool_calls.append(tool_info)
-                                        return StreamingChatResponse(
+                                        
+                                        response = StreamingChatResponse(
                                             type="tool",
                                             content=tool_info,
                                             is_complete=False
                                         )
+                                        try:
+                                            chunk_queue.put_nowait(response)
+                                        except asyncio.QueueFull:
+                                            pass
+                                        return response
                     elif isinstance(content.content, str) and content.content:
                         # Check if this looks like a tool result (JSON with "content" and "citations" fields)
                         content_str = content.content.strip()
@@ -241,21 +255,30 @@ async def chat_stream(request: ChatRequest):
                                     tool_result = f"Tool Result:\n{content_str}"
                                     if tool_result not in collected_tool_calls:
                                         collected_tool_calls.append(tool_result)
-                                        return StreamingChatResponse(
+                                        response = StreamingChatResponse(
                                             type="tool",
                                             content=tool_result,
                                             is_complete=False
                                         )
+                                        try:
+                                            chunk_queue.put_nowait(response)
+                                        except asyncio.QueueFull:
+                                            pass
+                                        return response
                             except json.JSONDecodeError:
                                 pass  # Not valid JSON, treat as regular text
                         
                         # Regular LLM text response
-                        collected_response.append(content.content)
-                        return StreamingChatResponse(
+                        response = StreamingChatResponse(
                             type="text", 
                             content=content.content,
                             is_complete=False
                         )
+                        try:
+                            chunk_queue.put_nowait(response)
+                        except asyncio.QueueFull:
+                            pass
+                        return response
                         
                 # Handle tool messages (tool responses from 'tools' node)
                 elif node == 'tools' and hasattr(content, 'content'):
@@ -264,46 +287,78 @@ async def chat_stream(request: ChatRequest):
                     # Only add if this exact result isn't already collected
                     if tool_result not in collected_tool_calls:
                         collected_tool_calls.append(tool_result)
-                        return StreamingChatResponse(
+                        response = StreamingChatResponse(
                             type="tool",
                             content=tool_result,
                             is_complete=False
                         )
+                        try:
+                            chunk_queue.put_nowait(response)
+                        except asyncio.QueueFull:
+                            pass
+                        return response
                 
                 return None
-
-            # Capture streamed content
-            streamed_chunks = []
             
-            def streaming_callback_wrapper(chunk):
-                response = streaming_callback(chunk)
-                if response:
-                    streamed_chunks.append(response)
-                return response
+            # Start the chat in a background task
+            async def run_chat():
+                nonlocal chat_complete
+                try:
+                    await agent_service.chat(
+                        message=request.message,
+                        thread_id=request.thread_id,
+                        timeout_seconds=request.timeout_seconds or 120,
+                        recursion_limit=request.recursion_limit or 100,
+                        callback=streaming_callback,
+                        enabled_tools=request.enabled_tools
+                    )
+                finally:
+                    chat_complete = True
+                    # Signal completion
+                    completion_response = StreamingChatResponse(
+                        type="complete",
+                        content="",
+                        is_complete=True
+                    )
+                    try:
+                        chunk_queue.put_nowait(completion_response)
+                    except asyncio.QueueFull:
+                        pass
             
-            # Process with streaming
-            result = await agent_service.chat(
-                message=request.message,
-                thread_id=request.thread_id,
-                timeout_seconds=request.timeout_seconds,
-                recursion_limit=request.recursion_limit,
-                callback=streaming_callback_wrapper,
-                enabled_tools=request.enabled_tools
-            )
+            # Start chat task
+            chat_task = asyncio.create_task(run_chat())
             
-            # Send all captured streaming chunks
-            for chunk_response in streamed_chunks:
-                yield f"data: {json.dumps(chunk_response.model_dump())}\n\n"
+            # Yield chunks as they become available in real-time
+            while not chat_complete or not chunk_queue.empty():
+                try:
+                    # Wait for a chunk with timeout
+                    chunk_response = await asyncio.wait_for(chunk_queue.get(), timeout=0.1)
+                    data = json.dumps(chunk_response.model_dump())
+                    yield f"data: {data}\n\n"
+                    
+                    if chunk_response.type == "complete":
+                        break
+                        
+                except asyncio.TimeoutError:
+                    # No chunk available, continue waiting
+                    continue
+                except Exception as e:
+                    # Handle any errors
+                    error_response = StreamingChatResponse(
+                        type="error",
+                        content=str(e),
+                        is_complete=True
+                    )
+                    yield f"data: {json.dumps(error_response.model_dump())}\n\n"
+                    break
             
-            # Don't send final tool calls summary as they were already streamed
-            
-            # Send final completion signal
-            final_response = StreamingChatResponse(
-                type="complete",
-                content="",  # Don't send content again, it was already streamed
-                is_complete=True
-            )
-            yield f"data: {json.dumps(final_response.model_dump())}\n\n"
+            # Ensure chat task is cleaned up
+            if not chat_task.done():
+                chat_task.cancel()
+                try:
+                    await chat_task
+                except asyncio.CancelledError:
+                    pass
             
         except Exception as e:
             error_response = StreamingChatResponse(
@@ -312,16 +367,16 @@ async def chat_stream(request: ChatRequest):
                 is_complete=True
             )
             yield f"data: {json.dumps(error_response.model_dump())}\n\n"
-    
-    async def send_chunk(chunk: StreamingChatResponse):
-        if chunk:
-            return f"data: {json.dumps(chunk.model_dump())}\n\n"
-        return ""
 
     return StreamingResponse(
         generate_stream(),
-        media_type="text/plain",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Content-Type"
+        }
     )
 
 

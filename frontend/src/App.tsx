@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { flushSync } from 'react-dom';
 import axios from 'axios';
-import { Send, Settings, RefreshCw, Plus, Trash2, Bot, User, Loader2, ChevronDown, ChevronRight, Wrench } from 'lucide-react';
+import { Send, Settings, RefreshCw, Plus, Bot, User, Loader2, ChevronDown, ChevronRight, Wrench } from 'lucide-react';
 import './App.css';
 
 // Types matching backend models
@@ -149,8 +149,18 @@ function App() {
     setInputMessage('');
     setIsLoading(true);
 
-    // Only create assistant message when we start getting content
-    let assistantMessage: ChatMessage | null = null;
+    // Create a unique timestamp identifier for this assistant message
+    const assistantTimestamp = new Date().toISOString();
+    
+    // Create a placeholder assistant message immediately for the "thinking" state
+    const thinkingMessage: ChatMessage = {
+      role: 'assistant',
+      content: '', // Empty content initially
+      timestamp: assistantTimestamp,
+      toolCalls: ''
+    };
+    
+    setMessages(prev => [...prev, thinkingMessage]);
 
     try {
       const request: ChatRequest = {
@@ -198,32 +208,19 @@ function App() {
                 const parsed: StreamingChatResponse = JSON.parse(data);
                 
                 if (parsed.type === 'text' && parsed.content) {
-                  // Create assistant message on first text content
-                  if (!assistantMessage) {
-                    assistantMessage = {
-                      role: 'assistant',
-                      content: '',
-                      timestamp: new Date().toISOString(),
-                      toolCalls: ''
-                    };
-                    setMessages(prev => [...prev, assistantMessage!]);
-                  }
-                  
+                  // Update existing assistant message with text content
                   accumulatedContent += parsed.content;
-                  
-                  // Create new object to force re-render
-                  const updatedMessage = {
-                    ...assistantMessage!,
-                    content: accumulatedContent,
-                    toolCalls: accumulatedToolCalls
-                  };
                   
                   // Force immediate UI update using flushSync
                   flushSync(() => {
                     setMessages(prev => 
                       prev.map(msg => 
-                        msg.timestamp === assistantMessage!.timestamp 
-                          ? updatedMessage
+                        msg.timestamp === assistantTimestamp && msg.role === 'assistant'
+                          ? {
+                              ...msg,
+                              content: accumulatedContent,
+                              toolCalls: accumulatedToolCalls
+                            }
                           : msg
                       )
                     );
@@ -232,32 +229,19 @@ function App() {
                   // Small delay to ensure UI renders before processing next chunk
                   await new Promise(resolve => setTimeout(resolve, 10));
                 } else if (parsed.type === 'tool' && parsed.content) {
-                  // Create assistant message if we get tool calls first
-                  if (!assistantMessage) {
-                    assistantMessage = {
-                      role: 'assistant',
-                      content: accumulatedContent,
-                      timestamp: new Date().toISOString(),
-                      toolCalls: ''
-                    };
-                    setMessages(prev => [...prev, assistantMessage!]);
-                  }
-                  
+                  // Update existing assistant message with tool calls
                   accumulatedToolCalls += (accumulatedToolCalls ? '\n\n' : '') + parsed.content;
-                  
-                  // Create new object to force re-render
-                  const updatedMessage = {
-                    ...assistantMessage!,
-                    content: accumulatedContent,
-                    toolCalls: accumulatedToolCalls
-                  };
                   
                   // Update tool calls with immediate UI update
                   flushSync(() => {
                     setMessages(prev => 
                       prev.map(msg => 
-                        msg.timestamp === assistantMessage!.timestamp 
-                          ? updatedMessage
+                        msg.timestamp === assistantTimestamp && msg.role === 'assistant'
+                          ? {
+                              ...msg,
+                              content: accumulatedContent,
+                              toolCalls: accumulatedToolCalls
+                            }
                           : msg
                       )
                     );
@@ -280,27 +264,17 @@ function App() {
         }
       }
     } catch (error: any) {
-      // If we haven't created assistant message yet, create error message
-      if (!assistantMessage) {
-        const errorMessage: ChatMessage = {
-          role: 'assistant',
-          content: `Error: ${error.message || 'An error occurred'}`,
-          timestamp: new Date().toISOString()
-        };
-        setMessages(prev => [...prev, errorMessage]);
-      } else {
-        // Update existing message with error
-        setMessages(prev => 
-          prev.map(msg => 
-            msg.timestamp === assistantMessage!.timestamp 
-              ? { 
-                  ...msg, 
-                  content: `Error: ${error.message || 'An error occurred'}` 
-                }
-              : msg
-          )
-        );
-      }
+      // Update existing assistant message with error
+      setMessages(prev => 
+        prev.map(msg => 
+          msg.timestamp === assistantTimestamp && msg.role === 'assistant'
+            ? { 
+                ...msg, 
+                content: `Error: ${error.message || 'An error occurred'}` 
+              }
+            : msg
+        )
+      );
     } finally {
       setIsLoading(false);
     }
@@ -578,7 +552,16 @@ function App() {
                   {message.role === 'assistant' ? (
                     <>
                       <div className="bg-white border shadow-sm p-3 rounded-lg">
-                        <div className="whitespace-pre-wrap">{message.content}</div>
+                        {message.content ? (
+                          <div className="whitespace-pre-wrap">{message.content}</div>
+                        ) : isLoading && index === messages.length - 1 ? (
+                          <div className="flex items-center gap-2 text-gray-500">
+                            <Loader2 size={16} className="animate-spin" />
+                            Agent is thinking...
+                          </div>
+                        ) : (
+                          <div className="whitespace-pre-wrap">{message.content}</div>
+                        )}
                         {message.timestamp && (
                           <div className="text-xs mt-2 text-gray-500">
                             {new Date(message.timestamp).toLocaleTimeString()}
@@ -627,21 +610,7 @@ function App() {
             </div>
           ))}
           
-          {isLoading && (
-            <div className="flex gap-3 justify-start">
-              <div className="flex gap-3 max-w-3xl">
-                <div className="w-8 h-8 rounded-full flex items-center justify-center bg-green-500 text-white">
-                  <Bot size={16} />
-                </div>
-                <div className="p-3 rounded-lg bg-white border shadow-sm">
-                  <div className="flex items-center gap-2 text-gray-500">
-                    <Loader2 size={16} className="animate-spin" />
-                    Agent is thinking...
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
+{/* The loading state is now handled within the assistant message itself */}
           
           <div ref={messagesEndRef} />
         </div>
