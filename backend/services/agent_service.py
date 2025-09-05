@@ -1,18 +1,20 @@
 import asyncio
-import uuid
 import logging
-from typing import Any, Dict, List, Callable, Optional
+import os
+import sys
+import uuid
+from typing import Any, Callable, Dict, List, Optional
+
+from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
-from langgraph.graph.state import CompiledStateGraph
-from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
-import sys
-import os
+from langgraph.graph.state import CompiledStateGraph
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from services.mcp_service import MCPService
 from services.graph_service import GraphService
+from services.mcp_service import MCPService
 
 logger = logging.getLogger(__name__)
 
@@ -34,11 +36,8 @@ class AgentService:
         
         # Output token limits for different models
         self.output_token_info = {
-            "claude-3-5-sonnet-latest": {"max_tokens": 8192},
-            "claude-3-5-haiku-latest": {"max_tokens": 8192},
-            "claude-3-7-sonnet-latest": {"max_tokens": 64000},
-            "gpt-4o": {"max_tokens": 16000},
-            "gpt-4o-mini": {"max_tokens": 16000},
+            "claude-sonnet-4-20250514": {"max_tokens": 64000},  # Max output tokens for Claude Sonnet 4
+            "gpt-5-mini": {"max_tokens": 16000},
         }
 
         # System prompt for the agent
@@ -52,19 +51,15 @@ class AgentService:
         
         # Check Anthropic API key
         if os.environ.get("ANTHROPIC_API_KEY"):
-            available_models.extend([
-                "claude-3-7-sonnet-latest",
-                "claude-3-5-sonnet-latest",
-                "claude-3-5-haiku-latest",
-            ])
+            available_models.append("claude-sonnet-4-20250514")
         
         # Check OpenAI API key
         if os.environ.get("OPENAI_API_KEY"):
-            available_models.extend(["gpt-4o", "gpt-4o-mini"])
+            available_models.append("gpt-5-mini")
         
-        return available_models or ["claude-3-7-sonnet-latest"]  # Default fallback
+        return available_models or ["claude-sonnet-4-20250514"]  # Default fallback
 
-    async def initialize_agent(self, model_name: str = "claude-3-7-sonnet-latest", enabled_tools: Optional[List[str]] = None, graph_type: str = "simple") -> bool:
+    async def initialize_agent(self, model_name: str = "claude-sonnet-4-20250514", enabled_tools: Optional[List[str]] = None, graph_type: str = "simple") -> bool:
         """Initialize agent with specified model and available tools"""
         try:
             # Ensure MCP service is initialized
@@ -81,22 +76,20 @@ class AgentService:
                 return False
 
             # Initialize the appropriate model
-            if model_name in [
-                "claude-3-7-sonnet-latest",
-                "claude-3-5-sonnet-latest", 
-                "claude-3-5-haiku-latest",
-            ]:
+            if model_name == "claude-sonnet-4-20250514":
                 model = ChatAnthropic(
                     model=model_name,
                     temperature=0.1,
                     max_tokens=self.output_token_info[model_name]["max_tokens"],
                 )
-            else:  # OpenAI models
+            elif model_name == "gpt-5-mini":
                 model = ChatOpenAI(
                     model=model_name,
                     temperature=0.1,
                     max_tokens=self.output_token_info[model_name]["max_tokens"],
                 )
+            else:
+                raise ValueError(f"Unsupported model: {model_name}")
 
             # Create agent based on graph type using graph_service
             if graph_type == "simple":
@@ -135,7 +128,7 @@ class AgentService:
         """Send message to agent and get response"""
         # Reinitialize agent with filtered tools if enabled_tools is provided
         if enabled_tools is not None:
-            success = await self.initialize_agent(self.current_model or "claude-3-7-sonnet-latest", enabled_tools, self.current_graph_type)
+            success = await self.initialize_agent(self.current_model or "claude-sonnet-4-20250514", enabled_tools, self.current_graph_type)
             if not success:
                 raise RuntimeError("Failed to initialize agent with filtered tools")
         elif not self.agent:
@@ -168,7 +161,7 @@ class AgentService:
                 }
             
             # Use graph_service unified streaming
-            logger.info(f"Starting streaming from graph type: {self.current_graph_type}")
+            logger.info(f"Starting streaming from graph type {self.current_graph_type} with model: {self.current_model}")
             response = await asyncio.wait_for(
                 self.graph_service.astream_graph(
                     graph=self.agent,
@@ -200,6 +193,6 @@ class AgentService:
         return {
             "initialized": self.is_initialized(),
             "tool_count": await self.mcp_service.get_tool_count(),
-            "model": self.current_model or "claude-3-7-sonnet-latest",
+            "model": self.current_model or "claude-sonnet-4-20250514",
             "available_models": self.get_available_models(),
         }

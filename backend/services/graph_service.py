@@ -7,6 +7,7 @@ from langchain_core.runnables import Runnable, RunnableConfig
 from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import create_react_agent
+from .streaming_service import StreamingService
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ class GraphService:
     
     def __init__(self):
         self.current_callback = None  # Store callback for tool nodes to access
+        self.streaming_service = StreamingService()  # Centralized streaming handler
         self.agent_prompt = """You are helping a user accomplish their request using available tools.
 
 USER REQUEST: {original_request}
@@ -36,12 +38,13 @@ AVAILABLE TOOLS: {tools}
 Rules:
 - Give direct, concise responses continuing from current progress without "Based on the current progress..." summaries
 - Speak directly to the user (use "you" not "the user")  
-- When you have sufficient information, provide a clear, organized summary to the user, then call "Complete"
+- When you have sufficient information, ALWAYS provide a clear text response to the user first, then call "Complete"
 - Be decisive - if you've found relevant information, that's usually enough
 - Don't over-explore unless the user specifically asks for comprehensive analysis
 - Focus on giving them actionable results efficiently
+- IMPORTANT: Never call "Complete" without first providing a helpful text response to the user
 
-What should you do next? Use a tool, provide a summary and call "Complete", or just call "Complete" if you're done."""
+What should you do next? Use a tool, provide a text response and call "Complete", or continue working?"""
 
         self.reflection_prompt = """You are evaluating whether the current work is complete and satisfactory.
 
@@ -97,7 +100,6 @@ Return either:
                 
                 # Check if agent called Complete tool
                 is_complete = False
-                summary = ""
                 
                 if hasattr(response, 'tool_calls') and response.tool_calls:
                     for tool_call in response.tool_calls:
@@ -306,14 +308,16 @@ Return either:
     ) -> Dict[str, Any]:
         """
         Unified streaming for both ReAct and Reflection graphs
-        Handles agent->tools->complete pattern with optional reflect node
+        Uses centralized StreamingService for consistent model-specific patterns
         """
         config = config or {}
         final_result = {}
-        collected_content = []
         
-        # Store callback for tool nodes to access
+        # Store callback for tool nodes to access (legacy support)
         self.current_callback = callback
+        
+        # Reset streaming service state for new conversation
+        self.streaming_service.reset_state()
         
         # Use messages mode for both graph types for consistency
         async for chunk_msg, metadata in graph.astream(
@@ -321,41 +325,13 @@ Return either:
         ):
             curr_node = metadata["langgraph_node"]
             
-            # Handle different node types with unified pattern
-            if curr_node == 'agent':
-                # Extract text content from agent responses
-                if hasattr(chunk_msg, 'type') and chunk_msg.type == 'AIMessageChunk':
-                    content_str = str(getattr(chunk_msg, 'content', ''))
-                    
-                    if content_str and content_str not in ['[]', '']:
-                        # Try to parse structured content
-                        if content_str.startswith('[') and content_str.endswith(']'):
-                            try:
-                                import ast
-                                parsed_content = ast.literal_eval(content_str)
-                                if isinstance(parsed_content, list):
-                                    for content_block in parsed_content:
-                                        if isinstance(content_block, dict) and content_block.get('type') == 'text':
-                                            text_content = content_block.get('text', '')
-                                            if text_content:
-                                                collected_content.append(text_content)
-                            except Exception:
-                                if content_str.strip():
-                                    collected_content.append(content_str)
-                        else:
-                            collected_content.append(content_str)
-            
-            elif curr_node == 'tools':
-                # Handle tool execution - standard for both graph types
-                if hasattr(chunk_msg, 'content'):
-                    tool_content = f"Tool executed: {getattr(chunk_msg, 'name', 'Unknown')}\nResult: {chunk_msg.content}"
-                    collected_content.append(tool_content)
-            
-            elif curr_node == 'reflect' and graph_type == 'reflection':
-                # Handle reflection node - only for reflection graphs
-                if hasattr(chunk_msg, 'content'):
-                    reflection_content = f"Reflection: {chunk_msg.content}"
-                    collected_content.append(reflection_content)
+            # Use centralized streaming service for consistent handling
+            await self.streaming_service.process_stream_chunk(
+                chunk_msg=chunk_msg,
+                node_name=curr_node,
+                graph_type=graph_type,
+                callback=callback
+            )
             
             # Update final result
             final_result = {
@@ -363,20 +339,14 @@ Return either:
                 "content": chunk_msg,
                 "metadata": metadata,
             }
-            
-            # Execute callback if provided
-            if callback:
-                result = callback({"node": curr_node, "content": chunk_msg})
-                if hasattr(result, "__await__"):
-                    await result
         
-        # Add collected content to final result
-        if collected_content:
-            final_result["collected_content"] = "".join(collected_content)
-        else:
+        # Extract final content using streaming service
+        final_content = self.streaming_service.extract_final_content()
+        if final_content:
+            final_result["collected_content"] = final_content
+        elif hasattr(final_result.get("content"), "content"):
             # Fallback to extracting from final message
-            if hasattr(final_result.get("content"), "content"):
-                final_result["collected_content"] = str(final_result["content"].content)
+            final_result["collected_content"] = str(final_result["content"].content)
         
         return final_result
     

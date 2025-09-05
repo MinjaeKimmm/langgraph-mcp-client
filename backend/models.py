@@ -1,6 +1,7 @@
-from pydantic import BaseModel, Field
-from typing import Dict, List, Optional, Any
 from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field
 
 
 class ToolConfig(BaseModel):
@@ -19,7 +20,7 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str = Field(description="User message to send to agent")
-    model: Optional[str] = Field(default="claude-3-7-sonnet-latest", description="Model to use")
+    model: Optional[str] = Field(default="claude-sonnet-4-20250514", description="Model to use")
     graph_type: Optional[str] = Field(default="simple", description="Graph type: simple or extended")
     timeout_seconds: Optional[int] = Field(default=120, description="Timeout in seconds")
     recursion_limit: Optional[int] = Field(default=100, description="Recursion limit")

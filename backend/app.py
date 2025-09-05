@@ -1,24 +1,30 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks
-from pydantic import ValidationError
-from fastapi.responses import StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
 import asyncio
 import json
+import logging
 import os
 import time
-import logging
-from typing import Dict, Any, AsyncGenerator
-from dotenv import load_dotenv
+from contextlib import asynccontextmanager
+from typing import Any, AsyncGenerator, Dict
 
+from dotenv import load_dotenv
+from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from models import (
-    ChatRequest, ChatResponse, StreamingChatResponse, 
-    AgentStatus, ToolInfo, ConfigUpdateRequest, HealthResponse, ToolConfig,
-    GroupedToolsResponse
+    AgentStatus,
+    ChatRequest,
+    ChatResponse,
+    ConfigUpdateRequest,
+    GroupedToolsResponse,
+    HealthResponse,
+    StreamingChatResponse,
+    ToolConfig,
+    ToolInfo,
 )
+from pydantic import ValidationError
+from services.agent_service import AgentService
 from services.config_service import ConfigService
 from services.mcp_service import MCPService
-from services.agent_service import AgentService
 
 # Load environment variables
 load_dotenv(override=True)
@@ -213,8 +219,22 @@ async def chat_stream(request: ChatRequest):
                 content = chunk.get("content", "")
                 
                 if node == "agent":
-                    # Handle content with mixed text and tool calls
-                    if hasattr(content, 'content') and content.content:
+                    # Handle direct text content from OpenAI models
+                    if hasattr(content, 'content') and isinstance(content.content, str) and content.content.strip():
+                        # Send plain text content
+                        response = StreamingChatResponse(
+                            type="text",
+                            content=content.content,
+                            is_complete=False
+                        )
+                        try:
+                            chunk_queue.put_nowait(response)
+                        except asyncio.QueueFull:
+                            pass
+                        return response
+                    
+                    # Handle content with mixed text and tool calls  
+                    elif hasattr(content, 'content') and content.content:
                         # Handle structured content (list of content blocks)
                         if isinstance(content.content, list):
                             for item in content.content:
@@ -304,7 +324,25 @@ async def chat_stream(request: ChatRequest):
                         tool_name = content.get('tool_name', 'unknown')
                         args = content.get('args', {})
                         
+                        if tool_name != 'unknown' and tool_call_id not in seen_tool_calls:
+                            # First send the tool name (like Anthropic does)
+                            seen_tool_calls.add(tool_call_id)
+                            tool_info = f"Tool: {tool_name}"
+                            collected_tool_calls.append(tool_info)
+                            
+                            response = StreamingChatResponse(
+                                type="tool",
+                                content=tool_info,
+                                tool_call_id=tool_call_id,
+                                is_complete=False
+                            )
+                            try:
+                                chunk_queue.put_nowait(response)
+                            except asyncio.QueueFull:
+                                pass
+                        
                         if args:
+                            # Then send the tool input
                             args_content = f"Tool Input: {json.dumps(args, indent=2)}"
                             response = StreamingChatResponse(
                                 type="tool",
@@ -443,7 +481,7 @@ async def update_config(request: ConfigUpdateRequest):
             raise HTTPException(status_code=500, detail="Failed to update configuration")
         
         # Reinitialize agent with new tools
-        await agent_service.initialize_agent(agent_service.current_model or "claude-3-7-sonnet-latest")
+        await agent_service.initialize_agent(agent_service.current_model or "claude-sonnet-4-20250514")
         
         return {"message": "Configuration updated successfully", "config": config_dict}
         
@@ -477,7 +515,7 @@ async def add_tool(tool_name: str, tool_config: dict):
             raise HTTPException(status_code=500, detail=f"Failed to connect to MCP server '{tool_name}'. Configuration not saved.")
         
         # Reinitialize agent with new tools
-        await agent_service.initialize_agent(agent_service.current_model or "claude-3-7-sonnet-latest")
+        await agent_service.initialize_agent(agent_service.current_model or "claude-sonnet-4-20250514")
         
         return {"message": f"Tool {tool_name} connected successfully and saved to configuration"}
         
@@ -501,7 +539,7 @@ async def remove_tool(tool_name: str):
             raise HTTPException(status_code=500, detail=f"Failed to remove tool {tool_name}")
         
         # Reinitialize agent
-        await agent_service.initialize_agent(agent_service.current_model or "claude-3-7-sonnet-latest")
+        await agent_service.initialize_agent(agent_service.current_model or "claude-sonnet-4-20250514")
         
         return {"message": f"Tool {tool_name} removed successfully"}
         

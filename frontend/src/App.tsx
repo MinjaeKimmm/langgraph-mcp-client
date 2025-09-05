@@ -91,7 +91,7 @@ function App() {
   const [status, setStatus] = useState<AgentStatus | null>(null);
   const [groupedTools, setGroupedTools] = useState<GroupedToolsResponse>({ servers: {} });
   // const [config, setConfig] = useState<Record<string, ToolConfig>>({});
-  const [selectedModel, setSelectedModel] = useState('claude-3-7-sonnet-latest');
+  const [selectedModel, setSelectedModel] = useState('claude-sonnet-4-20250514');
   const [selectedGraphType, setSelectedGraphType] = useState('simple');
   const [timeoutSeconds, setTimeoutSeconds] = useState(120);
   const [recursionLimit, setRecursionLimit] = useState(100);
