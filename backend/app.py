@@ -198,105 +198,111 @@ async def chat_stream(request: ChatRequest):
             seen_tool_calls = set()
             
             def streaming_callback(chunk: Dict[str, Any]):
-                """Callback that puts chunks into queue immediately"""
+                """Callback that uses proper LangGraph tool call protocol"""
                 node = chunk.get("node", "")
                 content = chunk.get("content", "")
                 
-                # Handle AI message chunks
-                if hasattr(content, 'content'):
-                    if isinstance(content.content, list):
-                        for item in content.content:
-                            if isinstance(item, dict):
-                                if item.get("type") == "text":
-                                    text = item.get("text", "")
-                                    if text:
-                                        response = StreamingChatResponse(
-                                            type="text",
-                                            content=text,
-                                            is_complete=False
-                                        )
-                                        try:
-                                            chunk_queue.put_nowait(response)
-                                        except asyncio.QueueFull:
-                                            pass
-                                        return response
-                                elif item.get("type") == "tool_use":
-                                    # Create unique identifier for this tool call
-                                    tool_id = item.get('id', f"{item.get('name', 'Unknown')}_{len(collected_tool_calls)}")
-                                    
-                                    # Only process if we haven't seen this tool call before
-                                    if tool_id not in seen_tool_calls:
-                                        seen_tool_calls.add(tool_id)
-                                        tool_info = f"Tool: {item.get('name', 'Unknown')}"
-                                        if 'input' in item:
-                                            tool_info += f"\nInput: {json.dumps(item['input'], indent=2)}"
-                                        collected_tool_calls.append(tool_info)
+                if node == "agent":
+                    # Handle content with mixed text and tool calls
+                    if hasattr(content, 'content') and content.content:
+                        # Handle structured content (list of content blocks)
+                        if isinstance(content.content, list):
+                            for item in content.content:
+                                if isinstance(item, dict):
+                                    if item.get("type") == "text":
+                                        text = item.get("text", "")
+                                        if text:
+                                            response = StreamingChatResponse(
+                                                type="text",
+                                                content=text,
+                                                is_complete=False
+                                            )
+                                            try:
+                                                chunk_queue.put_nowait(response)
+                                            except asyncio.QueueFull:
+                                                pass
+                                            return response
+                                    elif item.get("type") == "tool_use":
+                                        # Handle tool calls in content blocks (Anthropic format)
+                                        tool_name = item.get('name', 'Unknown')
+                                        tool_id = item.get('id', f"{tool_name}_{len(collected_tool_calls)}")
                                         
-                                        response = StreamingChatResponse(
-                                            type="tool",
-                                            content=tool_info,
-                                            is_complete=False
-                                        )
-                                        try:
-                                            chunk_queue.put_nowait(response)
-                                        except asyncio.QueueFull:
-                                            pass
-                                        return response
-                    elif isinstance(content.content, str) and content.content:
-                        # Check if this looks like a tool result (JSON with "content" and "citations" fields)
-                        content_str = content.content.strip()
-                        
-                        # Try to detect if this is a tool result vs regular AI response
-                        if content_str.startswith('{') and content_str.endswith('}'):
+                                        if tool_name != 'Unknown' and tool_id not in seen_tool_calls:
+                                            seen_tool_calls.add(tool_id)
+                                            tool_info = f"Tool: {tool_name}"
+                                            if 'input' in item:
+                                                tool_info += f"\nArgs: {json.dumps(item['input'], indent=2)}"
+                                            collected_tool_calls.append(tool_info)
+                                            
+                                            response = StreamingChatResponse(
+                                                type="tool",
+                                                content=tool_info,
+                                                tool_call_id=tool_id,
+                                                is_complete=False
+                                            )
+                                            try:
+                                                chunk_queue.put_nowait(response)
+                                            except asyncio.QueueFull:
+                                                pass
+                                            return response
+                        # Handle plain string content
+                        elif isinstance(content.content, str) and content.content.strip():
+                            response = StreamingChatResponse(
+                                type="text",
+                                content=content.content,
+                                is_complete=False
+                            )
                             try:
-                                parsed = json.loads(content_str)
-                                # If it has 'content' and 'citations' fields, it's likely a tool result
-                                if isinstance(parsed, dict) and 'content' in parsed and 'citations' in parsed:
-                                    tool_result = f"Tool Result:\n{content_str}"
-                                    if tool_result not in collected_tool_calls:
-                                        collected_tool_calls.append(tool_result)
-                                        response = StreamingChatResponse(
-                                            type="tool",
-                                            content=tool_result,
-                                            is_complete=False
-                                        )
-                                        try:
-                                            chunk_queue.put_nowait(response)
-                                        except asyncio.QueueFull:
-                                            pass
-                                        return response
-                            except json.JSONDecodeError:
-                                pass  # Not valid JSON, treat as regular text
+                                chunk_queue.put_nowait(response)
+                            except asyncio.QueueFull:
+                                pass
+                            return response
+                    
+                    # Handle standard LangGraph tool calls (if not already processed above)
+                    elif hasattr(content, 'tool_calls') and content.tool_calls:
+                        for tool_call in content.tool_calls:
+                            tool_name = tool_call.get('name', 'Unknown')
+                            tool_id = tool_call.get('id', f"{tool_name}_{len(collected_tool_calls)}")
+                            
+                            if tool_name != 'Unknown' and tool_id not in seen_tool_calls:
+                                seen_tool_calls.add(tool_id)
+                                tool_info = f"Tool: {tool_name}"
+                                if 'args' in tool_call:
+                                    tool_info += f"\nArgs: {json.dumps(tool_call['args'], indent=2)}"
+                                collected_tool_calls.append(tool_info)
+                                
+                                response = StreamingChatResponse(
+                                    type="tool",
+                                    content=tool_info,
+                                    tool_call_id=tool_id,
+                                    is_complete=False
+                                )
+                                try:
+                                    chunk_queue.put_nowait(response)
+                                except asyncio.QueueFull:
+                                    pass
+                                return response
+                
+                elif node == "tools":
+                    # Handle tool execution results from tools node
+                    if hasattr(content, 'content') and content.content:
+                        tool_result = f"Tool Result:\n{content.content}"
+                        # Get tool_call_id from ToolMessage to link with original call
+                        result_tool_id = getattr(content, 'tool_call_id', None)
                         
-                        # Regular LLM text response
-                        response = StreamingChatResponse(
-                            type="text", 
-                            content=content.content,
-                            is_complete=False
-                        )
-                        try:
-                            chunk_queue.put_nowait(response)
-                        except asyncio.QueueFull:
-                            pass
-                        return response
-                        
-                # Handle tool messages (tool responses from 'tools' node)
-                elif node == 'tools' and hasattr(content, 'content'):
-                    # Tool results from the tools node should be displayed separately
-                    tool_result = f"Tool Result:\n{content.content}"
-                    # Only add if this exact result isn't already collected
-                    if tool_result not in collected_tool_calls:
-                        collected_tool_calls.append(tool_result)
-                        response = StreamingChatResponse(
-                            type="tool",
-                            content=tool_result,
-                            is_complete=False
-                        )
-                        try:
-                            chunk_queue.put_nowait(response)
-                        except asyncio.QueueFull:
-                            pass
-                        return response
+                        if tool_result not in collected_tool_calls:
+                            collected_tool_calls.append(tool_result)
+                            response = StreamingChatResponse(
+                                type="tool",
+                                content=tool_result,
+                                tool_call_id=result_tool_id,
+                                is_complete=False
+                            )
+                            try:
+                                chunk_queue.put_nowait(response)
+                            except asyncio.QueueFull:
+                                pass
+                            return response
                 
                 return None
             

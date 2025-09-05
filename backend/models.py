@@ -45,6 +45,7 @@ class StreamingChatResponse(BaseModel):
     type: str = Field(description="Type: text, tool_call, or complete")
     content: Optional[str] = None
     tool_call: Optional[ToolCall] = None
+    tool_call_id: Optional[str] = Field(default=None, description="ID to group tool calls with their results")
     is_complete: bool = False
 
 

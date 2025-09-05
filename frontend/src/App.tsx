@@ -5,11 +5,26 @@ import { Send, Settings, RefreshCw, Plus, Bot, User, Loader2, ChevronDown, Chevr
 import './App.css';
 
 // Types matching backend models
+interface ToolCallInfo {
+  id: string;
+  name: string;
+  args: string;
+  result?: string;
+  expanded?: boolean;
+}
+
+interface MessagePart {
+  type: 'text' | 'tool_call';
+  content?: string;
+  toolCall?: ToolCallInfo;
+  timestamp: number; // For ordering
+}
+
 interface ChatMessage {
   role: 'user' | 'assistant';
-  content: string;
+  content: string; // For user messages
+  parts: MessagePart[]; // For assistant messages with inline tool calls
   timestamp?: string;
-  toolCalls?: string; // For storing tool call information
 }
 
 interface ChatRequest {
@@ -31,6 +46,7 @@ interface ChatResponse {
 interface StreamingChatResponse {
   type: 'text' | 'tool' | 'complete' | 'error';
   content: string;
+  tool_call_id?: string;
   is_complete: boolean;
 }
 
@@ -84,7 +100,6 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [newToolName, setNewToolName] = useState('');
   const [newToolConfig, setNewToolConfig] = useState('{}');
-  const [expandedTools, setExpandedTools] = useState<{[key: string]: boolean}>({});
   const [showToolPanel, setShowToolPanel] = useState(true); // Open by default
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -141,6 +156,7 @@ function App() {
     const userMessage: ChatMessage = {
       role: 'user',
       content: inputMessage,
+      parts: [], // User messages don't need parts
       timestamp: new Date().toISOString()
     };
 
@@ -153,14 +169,14 @@ function App() {
     const assistantTimestamp = new Date().toISOString();
     
     // Create a placeholder assistant message immediately for the "thinking" state
-    const thinkingMessage: ChatMessage = {
+    const assistantMessage: ChatMessage = {
       role: 'assistant',
-      content: '', // Empty content initially
-      timestamp: assistantTimestamp,
-      toolCalls: ''
+      content: '', // Not used for assistant messages
+      parts: [], // Will be populated as stream arrives
+      timestamp: assistantTimestamp
     };
     
-    setMessages(prev => [...prev, thinkingMessage]);
+    setMessages(prev => [...prev, assistantMessage]);
 
     try {
       const request: ChatRequest = {
@@ -190,8 +206,8 @@ function App() {
       }
 
       const decoder = new TextDecoder();
-      let accumulatedContent = '';
-      let accumulatedToolCalls = '';
+      const toolCalls = new Map<string, ToolCallInfo>(); // Track tool calls by ID
+      let partCounter = 0;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -208,46 +224,109 @@ function App() {
                 const parsed: StreamingChatResponse = JSON.parse(data);
                 
                 if (parsed.type === 'text' && parsed.content) {
-                  // Update existing assistant message with text content
-                  accumulatedContent += parsed.content;
-                  
-                  // Force immediate UI update using flushSync
+                  // Concatenate text with last text part if it exists
                   flushSync(() => {
                     setMessages(prev => 
                       prev.map(msg => 
                         msg.timestamp === assistantTimestamp && msg.role === 'assistant'
                           ? {
                               ...msg,
-                              content: accumulatedContent,
-                              toolCalls: accumulatedToolCalls
+                              parts: (() => {
+                                const parts = [...msg.parts];
+                                const lastPart = parts[parts.length - 1];
+                                
+                                // If last part is text, create new part with concatenated content
+                                if (lastPart && lastPart.type === 'text') {
+                                  const updatedParts = parts.slice(0, -1); // Remove last part
+                                  return [...updatedParts, {
+                                    ...lastPart,
+                                    content: (lastPart.content || '') + parsed.content
+                                  }];
+                                } else {
+                                  // Otherwise, add new text part
+                                  return [...parts, {
+                                    type: 'text',
+                                    content: parsed.content,
+                                    timestamp: partCounter++
+                                  }];
+                                }
+                              })()
                             }
                           : msg
                       )
                     );
                   });
                   
-                  // Small delay to ensure UI renders before processing next chunk
                   await new Promise(resolve => setTimeout(resolve, 10));
-                } else if (parsed.type === 'tool' && parsed.content) {
-                  // Update existing assistant message with tool calls
-                  accumulatedToolCalls += (accumulatedToolCalls ? '\n\n' : '') + parsed.content;
                   
-                  // Update tool calls with immediate UI update
-                  flushSync(() => {
-                    setMessages(prev => 
-                      prev.map(msg => 
-                        msg.timestamp === assistantTimestamp && msg.role === 'assistant'
-                          ? {
-                              ...msg,
-                              content: accumulatedContent,
-                              toolCalls: accumulatedToolCalls
-                            }
-                          : msg
-                      )
-                    );
-                  });
+                } else if (parsed.type === 'tool' && parsed.content && parsed.tool_call_id) {
+                  const isToolCall = parsed.content.startsWith('Tool:');
+                  const isToolResult = parsed.content.startsWith('Tool Result:');
+                  
+                  if (isToolCall) {
+                    // Extract tool name and args
+                    const lines = parsed.content.split('\n');
+                    const toolName = lines[0].replace('Tool: ', '');
+                    const argsLine = lines.find(l => l.startsWith('Args: '));
+                    const args = argsLine ? argsLine.replace('Args: ', '') : '{}';
+                    
+                    const toolCall: ToolCallInfo = {
+                      id: parsed.tool_call_id,
+                      name: toolName,
+                      args: args,
+                      expanded: false
+                    };
+                    
+                    toolCalls.set(parsed.tool_call_id, toolCall);
+                    
+                    // Add tool call part inline
+                    flushSync(() => {
+                      setMessages(prev => 
+                        prev.map(msg => 
+                          msg.timestamp === assistantTimestamp && msg.role === 'assistant'
+                            ? {
+                                ...msg,
+                                parts: [...msg.parts, {
+                                  type: 'tool_call',
+                                  toolCall: toolCall,
+                                  timestamp: partCounter++
+                                }]
+                              }
+                            : msg
+                        )
+                      );
+                    });
+                    
+                  } else if (isToolResult) {
+                    // Update existing tool call with result
+                    const result = parsed.content.replace('Tool Result:\n', '');
+                    const existingToolCall = toolCalls.get(parsed.tool_call_id);
+                    
+                    if (existingToolCall) {
+                      existingToolCall.result = result;
+                      toolCalls.set(parsed.tool_call_id, existingToolCall);
+                      
+                      // Update the tool call part with result
+                      flushSync(() => {
+                        setMessages(prev => 
+                          prev.map(msg => 
+                            msg.timestamp === assistantTimestamp && msg.role === 'assistant'
+                              ? {
+                                  ...msg,
+                                  parts: msg.parts.map(part => 
+                                    part.type === 'tool_call' && part.toolCall?.id === parsed.tool_call_id
+                                      ? { ...part, toolCall: existingToolCall }
+                                      : part
+                                  )
+                                }
+                              : msg
+                          )
+                        );
+                      });
+                    }
+                  }
+                  
                 } else if (parsed.type === 'complete') {
-                  // Final completion signal
                   break;
                 } else if (parsed.type === 'error') {
                   throw new Error(parsed.content);
@@ -270,7 +349,11 @@ function App() {
           msg.timestamp === assistantTimestamp && msg.role === 'assistant'
             ? { 
                 ...msg, 
-                content: `Error: ${error.message || 'An error occurred'}` 
+                parts: [{
+                  type: 'text',
+                  content: `Error: ${error.message || 'An error occurred'}`,
+                  timestamp: 0
+                }]
               }
             : msg
         )
@@ -538,7 +621,7 @@ function App() {
               key={index}
               className={`flex gap-3 ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
             >
-              <div className={`flex gap-3 max-w-3xl ${message.role === 'user' ? 'flex-row-reverse' : 'flex-row'}`}>
+              <div className={`flex gap-3 ${message.role === 'user' ? 'max-w-3xl flex-row-reverse' : 'w-full flex-row'}`}>
                 <div className={`w-8 h-8 rounded-full flex items-center justify-center ${
                   message.role === 'user' ? 'bg-blue-500' : 'bg-green-500'
                 } text-white`}>
@@ -550,51 +633,89 @@ function App() {
                     : 'space-y-2'
                 }`}>
                   {message.role === 'assistant' ? (
-                    <>
-                      <div className="bg-white border shadow-sm p-3 rounded-lg">
-                        {message.content ? (
-                          <div className="whitespace-pre-wrap">{message.content}</div>
-                        ) : isLoading && index === messages.length - 1 ? (
-                          <div className="flex items-center gap-2 text-gray-500">
-                            <Loader2 size={16} className="animate-spin" />
-                            Agent is thinking...
-                          </div>
-                        ) : (
-                          <div className="whitespace-pre-wrap">{message.content}</div>
-                        )}
-                        {message.timestamp && (
-                          <div className="text-xs mt-2 text-gray-500">
-                            {new Date(message.timestamp).toLocaleTimeString()}
-                          </div>
-                        )}
-                      </div>
-                      {message.toolCalls && message.toolCalls.trim() && (
-                        <div className="bg-gray-50 border rounded-lg overflow-hidden">
-                          <button
-                            onClick={() => setExpandedTools(prev => ({
-                              ...prev,
-                              [index]: !prev[index]
-                            }))}
-                            className="w-full px-3 py-2 text-left flex items-center gap-2 hover:bg-gray-100 transition-colors"
-                          >
-                            <Wrench size={16} className="text-orange-500" />
-                            <span className="text-sm font-medium text-gray-700">Tool Call Information</span>
-                            {expandedTools[index] ? (
-                              <ChevronDown size={16} className="text-gray-400 ml-auto" />
-                            ) : (
-                              <ChevronRight size={16} className="text-gray-400 ml-auto" />
-                            )}
-                          </button>
-                          {expandedTools[index] && (
-                            <div className="px-3 pb-3 border-t bg-gray-50">
-                              <pre className="text-xs text-gray-600 whitespace-pre-wrap bg-gray-100 p-2 rounded mt-2 overflow-x-auto">
-                                {message.toolCalls}
-                              </pre>
+                    <div className="bg-white border shadow-sm p-3 rounded-lg space-y-2">
+                      {message.parts.length === 0 && isLoading && index === messages.length - 1 ? (
+                        <div className="flex items-center gap-2 text-gray-500">
+                          <Loader2 size={16} className="animate-spin" />
+                          Agent is thinking...
+                        </div>
+                      ) : (
+                        message.parts
+                          .sort((a, b) => a.timestamp - b.timestamp)
+                          .map((part, partIndex) => (
+                            <div key={partIndex}>
+                              {part.type === 'text' ? (
+                                <span className="whitespace-pre-wrap">{part.content}</span>
+                              ) : part.type === 'tool_call' && part.toolCall ? (
+                                <div className="bg-gray-50 border rounded-lg overflow-hidden my-2 max-w-full">
+                                  <button
+                                    onClick={() => {
+                                      const toolCall = part.toolCall!;
+                                      setMessages(prev =>
+                                        prev.map(msg =>
+                                          msg.timestamp === message.timestamp
+                                            ? {
+                                                ...msg,
+                                                parts: msg.parts.map(p =>
+                                                  p.toolCall?.id === toolCall.id
+                                                    ? {
+                                                        ...p,
+                                                        toolCall: {
+                                                          ...toolCall,
+                                                          expanded: !toolCall.expanded
+                                                        }
+                                                      }
+                                                    : p
+                                                )
+                                              }
+                                            : msg
+                                        )
+                                      );
+                                    }}
+                                    className="w-full px-3 py-2 text-left flex items-center gap-2 hover:bg-gray-100 transition-colors min-w-0"
+                                  >
+                                    <Wrench size={16} className="text-orange-500 flex-shrink-0" />
+                                    <span className="text-sm font-medium text-gray-700 truncate">
+                                      {part.toolCall.name}
+                                    </span>
+                                    {part.toolCall.result && (
+                                      <span className="text-xs text-green-600 ml-1 flex-shrink-0">✓</span>
+                                    )}
+                                    {part.toolCall.expanded ? (
+                                      <ChevronDown size={16} className="text-gray-400 ml-auto flex-shrink-0" />
+                                    ) : (
+                                      <ChevronRight size={16} className="text-gray-400 ml-auto flex-shrink-0" />
+                                    )}
+                                  </button>
+                                  {part.toolCall.expanded && (
+                                    <div className="px-3 pb-3 border-t bg-gray-50 max-w-full">
+                                      <div className="text-xs text-gray-600 mt-2 break-words">
+                                        <div className="font-medium mb-1">Arguments:</div>
+                                        <pre className="bg-gray-100 p-2 rounded text-xs whitespace-pre-wrap break-words overflow-hidden">
+                                          {part.toolCall.args}
+                                        </pre>
+                                        {part.toolCall.result && (
+                                          <>
+                                            <div className="font-medium mt-2 mb-1">Result:</div>
+                                            <pre className="bg-gray-100 p-2 rounded text-xs whitespace-pre-wrap break-words overflow-hidden">
+                                              {part.toolCall.result}
+                                            </pre>
+                                          </>
+                                        )}
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              ) : null}
                             </div>
-                          )}
+                          ))
+                      )}
+                      {message.timestamp && (
+                        <div className="text-xs mt-2 text-gray-500 pt-2 border-t">
+                          {new Date(message.timestamp).toLocaleTimeString()}
                         </div>
                       )}
-                    </>
+                    </div>
                   ) : (
                     <>
                       <div className="whitespace-pre-wrap">{message.content}</div>
