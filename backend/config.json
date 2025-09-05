@@ -29,7 +29,8 @@
     ],
     "transport": "stdio",
     "env": {
-      "PYTHONPATH": "."
+      "PYTHONPATH": ".",
+      "GDRIVE_ACCESS_TOKEN": "${GDRIVE_ACCESS_TOKEN}"
     }
   }
 }

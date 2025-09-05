@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from typing import Dict, Any
 from pathlib import Path
 import sys
@@ -20,17 +21,38 @@ class ConfigService:
         }
 
     def load_config(self) -> Dict[str, Any]:
-        """Load MCP configuration from JSON file"""
+        """Load MCP configuration from JSON file with environment variable substitution"""
         try:
             if self.config_file.exists():
                 with open(self.config_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    config = json.load(f)
+                    return self._substitute_env_vars(config)
             else:
                 # Create file with default config if it doesn't exist
                 self.save_config(self.default_config)
                 return self.default_config
         except Exception as e:
             raise RuntimeError(f"Error loading config file: {str(e)}")
+    
+    def _substitute_env_vars(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Recursively substitute environment variables in config"""
+        
+        def substitute_value(value):
+            if isinstance(value, str):
+                # Replace ${VAR} patterns with environment variables
+                pattern = r'\$\{([^}]+)\}'
+                def replacer(match):
+                    env_var = match.group(1)
+                    return os.environ.get(env_var, match.group(0))  # Keep original if not found
+                return re.sub(pattern, replacer, value)
+            elif isinstance(value, dict):
+                return {k: substitute_value(v) for k, v in value.items()}
+            elif isinstance(value, list):
+                return [substitute_value(item) for item in value]
+            else:
+                return value
+        
+        return substitute_value(config)
     
     def extract_tool_config(self, raw_config: dict[str, Any], tool_name: str | None = None) -> dict[str, Any]:
         """Smart extraction of tool configuration from various nested formats"""
